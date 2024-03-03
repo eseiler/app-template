@@ -7,63 +7,26 @@
 
 #include <sharg/all.hpp>
 
-#include <seqan3/io/sequence_file/input.hpp>
 #include <seqan3/search/views/kmer_hash.hpp>
 
-#include <hibf/cereal/path.hpp>
-#include <hibf/config.hpp>
-#include <hibf/hierarchical_interleaved_bloom_filter.hpp>
+#include "index.hpp"
+#include "sequence_io.hpp"
+#include "validator.hpp"
 
-struct dna4_traits : seqan3::sequence_file_input_default_traits_dna
-{
-    using sequence_alphabet = seqan3::dna4;
-};
-
-using sequence_file_input = seqan3::sequence_file_input<dna4_traits, seqan3::fields<seqan3::field::seq>>;
-
-struct myindex
-{
-    uint8_t kmer{};
-    std::vector<std::filesystem::path> input_files{};
-    seqan::hibf::hierarchical_interleaved_bloom_filter hibf{};
-
-    myindex() = default;
-    myindex & operator=(myindex const &) = default;
-    myindex(myindex const &) = default;
-    myindex(myindex &&) = default;
-    myindex & operator=(myindex &&) = default;
-
-    explicit myindex(uint8_t const kmer,
-                     std::vector<std::filesystem::path> input_files,
-                     seqan::hibf::hierarchical_interleaved_bloom_filter hibf) :
-        kmer{kmer},
-        input_files{std::move(input_files)},
-        hibf{std::move(hibf)}
-    {}
-
-    template <typename archive_t>
-    void CEREAL_SERIALIZE_FUNCTION_NAME(archive_t & archive)
-    {
-        archive(kmer);
-        archive(input_files);
-        archive(hibf);
-    }
-};
-
-struct config
+struct build_config
 {
     std::filesystem::path input{};
     std::vector<std::filesystem::path> input_files{};
     std::filesystem::path output{};
     uint8_t kmer{};
-    uint8_t threads{1};
+    uint8_t threads{1u};
 };
 
-void build_hibf(config & config)
+void build_hibf(build_config & config)
 {
     auto input_lambda = [&config](size_t const user_bin_index, seqan::hibf::insert_iterator it)
     {
-        sequence_file_input fin{config.input_files[user_bin_index]};
+        seq_reader fin{config.input_files[user_bin_index]};
         for (auto && [seq] : fin)
             for (auto && hash : seq | seqan3::views::kmer_hash(seqan3::ungapped{config.kmer}))
                 it = hash;
@@ -77,13 +40,10 @@ void build_hibf(config & config)
 
     seqan::hibf::hierarchical_interleaved_bloom_filter hibf{hibf_config};
     myindex index{config.kmer, std::move(config.input_files), std::move(hibf)};
-
-    std::ofstream fout{config.output};
-    cereal::BinaryOutputArchive oarchive{fout};
-    oarchive(index);
+    index.store(config.output);
 }
 
-void read_input_files(config & config)
+void read_input_files(build_config & config)
 {
     std::ifstream file{config.input};
     std::string line{};
@@ -99,7 +59,7 @@ void read_input_files(config & config)
 
 void build(sharg::parser & parser)
 {
-    config config{};
+    build_config config{};
     parser.add_option(config.input,
                       sharg::config{.short_id = 'i',
                                     .long_id = "input",
@@ -125,7 +85,7 @@ void build(sharg::parser & parser)
                       sharg::config{.short_id = 't',
                                     .long_id = "threads",
                                     .description = "Threads.",
-                                    .validator = sharg::arithmetic_range_validator{1, 255}});
+                                    .validator = positive_integer_validator<decltype(config.threads)>{}});
 
     try
     {

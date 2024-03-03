@@ -7,23 +7,66 @@
 
 #include <sharg/all.hpp>
 
-struct config
+#include <seqan3/search/views/kmer_hash.hpp>
+
+#include "index.hpp"
+#include "sequence_io.hpp"
+
+struct search_config
 {
     std::filesystem::path index{};
+    std::filesystem::path query{};
     std::filesystem::path output{};
     double threshold{0.7};
-    uint8_t threads{1};
 };
+
+void search_index(search_config const & config)
+{
+    myindex index{};
+    index.load(config.index);
+
+    auto agent = index.hibf.membership_agent();
+
+    id_seq_reader fin{config.query};
+    std::vector<uint64_t> hashes{};
+    std::ofstream fout{config.output};
+
+    for (size_t i = 0; i < index.input_files.size(); ++i)
+        fout << '#' << i << '\t' << index.input_files[i].c_str() << '\n';
+    fout << "#QUERY_ID\tUSER_BINS\n";
+
+    for (auto && [id, seq] : fin)
+    {
+        auto kmer_hash_view = seq | seqan3::views::kmer_hash(seqan3::ungapped{index.kmer});
+        hashes.assign(kmer_hash_view.begin(), kmer_hash_view.end());
+        uint16_t const threshold = static_cast<uint16_t>(config.threshold * hashes.size());
+
+        auto & result = agent.membership_for(hashes, threshold);
+        agent.sort_results(); // Optional
+
+        fout << id << '\t';
+        for (auto && r : result)
+            fout << r << ' ';
+        fout << '\n';
+    }
+}
 
 void search(sharg::parser & parser)
 {
-    config config{};
+    search_config config{};
     parser.add_option(config.index,
                       sharg::config{.short_id = 'i',
-                                    .long_id = "input",
-                                    .description = "Input",
+                                    .long_id = "index",
+                                    .description = "Index",
                                     .required = true,
                                     .validator = sharg::input_file_validator{}});
+
+    parser.add_option(config.query,
+                      sharg::config{.short_id = 'q',
+                                    .long_id = "query",
+                                    .description = "Query",
+                                    .required = true,
+                                    .validator = sharg::input_file_validator{{"fq", "fastq"}}});
 
     parser.add_option(config.output,
                       sharg::config{.short_id = 'o',
@@ -38,12 +81,6 @@ void search(sharg::parser & parser)
                                     .description = "Threshold.",
                                     .validator = sharg::arithmetic_range_validator{0.0, 1.0}});
 
-    parser.add_option(config.threads,
-                      sharg::config{.short_id = 't',
-                                    .long_id = "threads",
-                                    .description = "Threads.",
-                                    .validator = sharg::arithmetic_range_validator{1, 255}});
-
     try
     {
         parser.parse();
@@ -53,4 +90,6 @@ void search(sharg::parser & parser)
         std::cerr << "Parsing error. " << ext.what() << '\n';
         std::exit(EXIT_FAILURE);
     }
+
+    search_index(config);
 }
